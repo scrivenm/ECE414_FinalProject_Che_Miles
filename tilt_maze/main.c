@@ -24,11 +24,37 @@ int main(){
     );
 
     if (result != 2){
-        print("MPU6050 conenction failed!\n");
+        print("MPU6050 connection failed!\n");
         while (true){
             sleep_ms(1000);
         }
     }
 
     print("MPU6050 connected!\n");
+
+    while(true){
+        uint8_t reg = 0x3B; // Starting register for accelerometer data
+        uint8_t data[6];
+
+        int sent = i2c_write_blocking(i2c0, MPU_ADDR, &reg, 1, true);
+
+        if (sent != 1){
+            print("Failed to request data from MPU6050\n");
+            sleep_ms(200);
+            continue;
+        }
+
+        int received = i2c_read_blocking(i2c0, MPU_ADDR, data, 6, false);
+
+        if (received == 6){
+            int16_t ax = int16_t(data[0] << 8 | data[1]);
+            int16_t ay = int16_t(data[2] << 8 | data[3]);
+            int16_t az = int16_t(data[4] << 8 | data[5]);
+            print("Accelerometer Data - X: %d, Y: %d, Z: %d\n", ax, ay, az);
+        } else {
+            print("Failed to read data from MPU6050\n");
+        }
+
+        sleep_ms(200);
+    }
 }
