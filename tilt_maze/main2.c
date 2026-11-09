@@ -1,178 +1,200 @@
 #include <stdio.h>
 #include <math.h>
 #include "pico/stdlib.h"
-#include "hardware/spi.h"
 #include "hardware/i2c.h"
+#include "TFTMaster.h"
+#include "ts_lcd.h"
 
+// game state def
+enum GameState {
+    GAME_INIT,
+    GAME_PLAYING,
+    GAME_WIN,
+    GAME_RESET } GameState;
+
+// screen and ball setting
+#define SCREEN_WIDTH  240
+#define SCREEN_HEIGHT 320
+#define BALL_RADIUS   6
+
+// MPU6050
 #define MPU_ADDR 0x68
-#define SDA_PIN 4
-#define SCL_PIN 5
+#define SDA_PIN  4
+#define SCL_PIN  5
 
-#define LCD_WIDTH  240
-#define LCD_HEIGHT 320
-#define BALL_RADIUS 8
+// physical movement of the ball
+static float ball_x = 30.0f;
+static float ball_y = 30.0f;
+static float ball_vx = 0.0f;
+static float ball_vy = 0.0f;
 
-#define PIN_CS   17
-#define PIN_DC   16
-#define PIN_SCK  18
-#define PIN_MOSI 19
-#define PIN_RST  20
+static int16_t prev_x = 30;
+static int16_t prev_y = 30;
 
-// color def
-#define COLOR_BLACK 0x0000
-#define COLOR_WHITE 0xFFFF
-#define COLOR_RED   0xF800
-#define COLOR_BLUE  0x001F
+// maze xyz
+typedef struct {
+    int16_t x, y, w, h; } Wall;
 
-// --- ILI9341 屏幕驱动函数 ---
-void lcd_write_cmd(uint8_t cmd) {
-    gpio_put(PIN_DC, 0); 
-    gpio_put(PIN_CS, 0);
-    spi_write_blocking(spi0, &cmd, 1);
-    gpio_put(PIN_CS, 1);
+// maze map def
+static const Wall maze_walls[] = {
+    {0, 0, 240, 10},   // top
+    {0, 0, 10, 320},   // left
+    {230, 0, 10, 320}, // right
+    {0, 310, 240, 10}, // down
+    {40, 50, 150, 10}, // inner wall
+    {40, 120, 10, 140},// inner wall
+    {110, 120, 90, 10} // inner wall
+};
+#define NUM_WALLS (sizeof(maze_walls) / sizeof(Wall))
+
+// draw the wall and maze
+void draw_maze_screen() {
+    tft_fillScreen(ILI9340_BLACK);
+    
+    // blue boundry of the maze
+    for (int i = 0; i < NUM_WALLS; i++) {
+        tft_fillRect(maze_walls[i].x, maze_walls[i].y, maze_walls[i].w, maze_walls[i].h, ILI9340_BLUE);
+    }
+    
+    // the final place need to go
+    tft_fillRect(190, 270, 30, 30, ILI9340_GREEN);
 }
 
-void lcd_write_data(uint8_t data) {
-    gpio_put(PIN_DC, 1);
-    gpio_put(PIN_CS, 0);
-    spi_write_blocking(spi0, &data, 1);
-    gpio_put(PIN_CS, 1);
-}
-
-void ili9341_init() {
-    gpio_put(PIN_RST, 0);
-    sleep_ms(50);
-    gpio_put(PIN_RST, 1);
-    sleep_ms(120);
-
-    lcd_write_cmd(0x01);
-    sleep_ms(120);
-
-    lcd_write_cmd(0x11); 
-    sleep_ms(120);
-
-    lcd_write_cmd(0x3A); 
-    lcd_write_data(0x55);
-
-    lcd_write_cmd(0x29); 
-}
-
-void lcd_set_window(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
-    lcd_write_cmd(0x2A); // line address
-    lcd_write_data(x0 >> 8); lcd_write_data(x0 & 0xFF);
-    lcd_write_data(x1 >> 8); lcd_write_data(x1 & 0xFF);
-
-    lcd_write_cmd(0x2B); // row address
-    lcd_write_data(y0 >> 8); lcd_write_data(y0 & 0xFF);
-    lcd_write_data(y1 >> 8); lcd_write_data(y1 & 0xFF);
-
-    lcd_write_cmd(0x2C); // ram
-
-void lcd_draw_circle_filled(int16_t x0, int16_t y0, int16_t r, uint16_t color) {
-    for (int16_t y = -r; y <= r; y++) {
-        for (int16_t x = -r; x <= r; x++) {
-            if (x * x + y * y <= r * r) {
-                int16_t px = x0 + x;
-                int16_t py = y0 + y;
-                if (px >= 0 && px < LCD_WIDTH && py >= 0 && py < LCD_HEIGHT) {
-                    lcd_set_window(px, py, px, py);
-                    gpio_put(PIN_DC, 1);
-                    gpio_put(PIN_CS, 0);
-                    uint8_t bytes[] = {color >> 8, color & 0xFF};
-                    spi_write_blocking(spi0, bytes, 2);
-                    gpio_put(PIN_CS, 1);
-                }
-            }
+// collision detection of the ball
+bool check_collision(float x, float y, float r) {
+    for (int i = 0; i < NUM_WALLS; i++) {
+        if (x + r > maze_walls[i].x && x - r < maze_walls[i].x + maze_walls[i].w &&
+            y + r > maze_walls[i].y && y - r < maze_walls[i].y + maze_walls[i].h) {
+            return true;
         }
+    }
+    return false;
+}
+
+// I use something similar to our calculator tick
+void maze_game_tick(float ax, float ay) {
+    const float dt = 0.02f; // 20ms 周期
+
+    switch (GameState) {
+        case GAME_INIT:
+            draw_maze_screen();
+            ball_x = 25.0f;
+            ball_y = 25.0f;
+            ball_vx = 0.0f;
+            ball_vy = 0.0f;
+            GameState = GAME_PLAYING;
+            break;
+
+        case GAME_PLAYING:
+            // update the MCU 6050 acceleration
+            ball_vx += ay * dt * 140.0f; 
+            ball_vy += ax * dt * 140.0f;
+
+            ball_vx *= 0.92f;
+            ball_vy *= 0.92f;
+
+            // X axis rebound and collision
+            float next_x = ball_x + ball_vx;
+            if (!check_collision(next_x, ball_y, BALL_RADIUS)) {
+                ball_x = next_x;
+            } else {
+                ball_vx = -ball_vx * 0.3f; 
+            }
+
+            // Y axis
+            float next_y = ball_y + ball_vy;
+            if (!check_collision(ball_x, next_y, BALL_RADIUS)) {
+                ball_y = next_y;
+            } else {
+                ball_vy = -ball_vy * 0.3f;
+            }
+
+            // finish game setting
+            if (ball_x >= 190 && ball_x <= 220 && ball_y >= 270 && ball_y <= 300) {
+                GameState = GAME_WIN;
+            }
+            break;
+
+        case GAME_WIN:
+            tft_setCursor(50, 140);
+            tft_setTextColor(ILI9340_YELLOW);
+            tft_setTextSize(3);
+            tft_writeString("YOU WIN!");
+            break;
+
+        case GAME_RESET:
+            GameState = GAME_INIT;
+            break;
+
+        default:
+            GameState = GAME_INIT;
+            break;
+    }
+}
+
+// to refresh the ball place
+void render_ball() {
+    int16_t curr_x = (int16_t)ball_x;
+    int16_t curr_y = (int16_t)ball_y;
+
+    if (curr_x != prev_x || curr_y != prev_y) {
+        // erase the oled place
+        tft_fillCircle(prev_x, prev_y, BALL_RADIUS, ILI9340_BLACK);
+        
+        // draw new place
+        tft_fillCircle(curr_x, curr_y, BALL_RADIUS, ILI9340_RED);
+        
+        prev_x = curr_x;
+        prev_y = curr_y;
     }
 }
 
 int main() {
     stdio_init_all();
-    sleep_ms(2000);
+    sleep_ms(1500);
 
-    // connect MPU6050
+    // initialize the screen
+    ts_lcd_init();
+
+    // initialize I2C conneting MPU6050
     i2c_init(i2c0, 100000);
     gpio_set_function(SDA_PIN, GPIO_FUNC_I2C);
     gpio_set_function(SCL_PIN, GPIO_FUNC_I2C);
     gpio_pull_up(SDA_PIN);
     gpio_pull_up(SCL_PIN);
 
-    // MPU6050 wake up
+    // wake up MPU6050
     uint8_t wake[2] = {0x6B, 0x00};
-    int result = i2c_write_blocking(i2c0, MPU_ADDR, wake, 2, false);
-    if (result != 2) {
-        printf("MPU6050 connection failed!\n");
-    } else {
-        printf("MPU6050 connected!\n");
-    }
+    i2c_write_blocking(i2c0, MPU_ADDR, wake, 2, false);
 
-    // initialize the screen
-    spi_init(spi0, 30 * 1000 * 1000); // 30MHz SPI
-    gpio_set_function(PIN_SCK, GPIO_FUNC_SPI);
-    gpio_set_function(PIN_MOSI, GPIO_FUNC_SPI);
+    // initialize game state
+    GameState = GAME_INIT;
 
-    gpio_init(PIN_CS);  gpio_set_dir(PIN_CS, GPIO_OUT);
-    gpio_init(PIN_DC);  gpio_set_dir(PIN_DC, GPIO_OUT);
-    gpio_init(PIN_RST); gpio_set_dir(PIN_RST, GPIO_OUT);
+    while (1) {
+        // clk
+        sleep_ms(20);
 
-    ili9341_init();
-
-    // initialize the place of the little ball
-    float ball_x = LCD_WIDTH / 2.0f;
-    float ball_y = LCD_HEIGHT / 2.0f;
-    float ball_vx = 0.0f, ball_vy = 0.0f;
-    
-    int16_t prev_x = (int16_t)ball_x;
-    int16_t prev_y = (int16_t)ball_y;
-    const float dt = 0.02f; // refresh T
-
-    while (true) {
-        // read MPU6050 data
-        uint8_t reg = 0x3B;//
+        // read acceleration date given by MPU6050
+        uint8_t reg = 0x3B;
         uint8_t data[6];
+        float ax = 0.0f, ay = 0.0f;
 
-        int sent = i2c_write_blocking(i2c0, MPU_ADDR, &reg, 1, true);
-        if (sent == 1) {
-            int received = i2c_read_blocking(i2c0, MPU_ADDR, data, 6, false);
-            if (received == 6) {
-                int16_t ax = (int16_t)(data[0] << 8 | data[1]);
-                int16_t ay = (int16_t)(data[2] << 8 | data[3]);
-                
-                // accleration of the ball we can adjust later
-                float ax_f = (float)ax / 16384.0f; // 
-                float ay_f = (float)ay / 16384.0f;
-
-                // refresh place of ball
-                ball_vx += ay_f * dt * 150.0f; 
-                ball_vy += ax_f * dt * 150.0f;
-
-                ball_vx *= 0.92f;
-                ball_vy *= 0.92f;
-
-                ball_x += ball_vx;
-                ball_y += ball_vy;
-
-                // boundry of the maze, now is a big square
-                if (ball_x < BALL_RADIUS) { ball_x = BALL_RADIUS; ball_vx = -ball_vx * 0.3f; }
-                if (ball_x > LCD_WIDTH - BALL_RADIUS) { ball_x = LCD_WIDTH - BALL_RADIUS; ball_vx = -ball_vx * 0.3f; }
-                if (ball_y < BALL_RADIUS) { ball_y = BALL_RADIUS; ball_vy = -ball_vy * 0.3f; }
-                if (ball_y > LCD_HEIGHT - BALL_RADIUS) { ball_y = LCD_HEIGHT - BALL_RADIUS; ball_vy = -ball_vy * 0.3f; }
+        if (i2c_write_blocking(i2c0, MPU_ADDR, &reg, 1, true) == 1) {
+            if (i2c_read_blocking(i2c0, MPU_ADDR, data, 6, false) == 6) {
+                int16_t raw_ax = (int16_t)(data[0] << 8 | data[1]);
+                int16_t raw_ay = (int16_t)(data[2] << 8 | data[3]);
+                ax = (float)raw_ax / 16384.0f;
+                ay = (float)raw_ay / 16384.0f;
             }
         }
 
-        // redraw the litel ball
-        int16_t curr_x = (int16_t)ball_x;
-        int16_t curr_y = (int16_t)ball_y;
+        // run game state
+        maze_game_tick(ax, ay);
 
-        if (curr_x != prev_x || curr_y != prev_y) {
-            lcd_draw_circle_filled(prev_x, prev_y, BALL_RADIUS, COLOR_BLACK); // old graph
-            lcd_draw_circle_filled(curr_x, curr_y, BALL_RADIUS, COLOR_RED);   // new graph
-            prev_x = curr_x;
-            prev_y = curr_y;
+        // refresh picture
+        if (GameState == GAME_PLAYING) {
+            render_ball();
         }
-
-        sleep_ms(20); 
     }
     return 0;
 }
