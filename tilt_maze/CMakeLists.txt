@@ -2,22 +2,28 @@ cmake_minimum_required(VERSION 3.13)
 
 include(pico_sdk_import.cmake)
 
-project(TiltMaze)
+project(Lab5)
 
 pico_sdk_init()
 
-add_executable(
-    TiltMaze
-    main.c 
+add_executable(Lab5    
+    user_interface.c
+    user_interface_test.c
+    ts_lcd.c
+    TouchScreen.c
+    TFTMaster.c
 )
 
-target_link_libraries(
-    TiltMaze
+pico_generate_pio_header(Lab5 ${CMAKE_CURRENT_LIST_DIR}/SPIPIO.pio)
+
+target_link_libraries(Lab5  
     pico_stdlib
-    hardware_i2c
+    hardware_gpio 
+    hardware_pio 
+    hardware_irq
+    hardware_adc
+    pico_bootsel_via_double_reset
 )
 
-pico_enable_stdio_usb(TiltMaze 1)
-pico_enable_stdio_uart(TiltMaze 0)
-
-pico_add_extra_outputs(TiltMaze)
+pico_enable_stdio_uart(Lab5 1)
+pico_add_extra_outputs(Lab5)
