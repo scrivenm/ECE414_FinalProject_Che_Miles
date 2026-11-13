@@ -7,8 +7,7 @@ project(Lab5)
 pico_sdk_init()
 
 add_executable(Lab5    
-    user_interface.c
-    user_interface_test.c
+    main.c
     ts_lcd.c
     TouchScreen.c
     TFTMaster.c
@@ -22,6 +21,7 @@ target_link_libraries(Lab5
     hardware_pio 
     hardware_irq
     hardware_adc
+    hardware_i2c
     pico_bootsel_via_double_reset
 )
 
